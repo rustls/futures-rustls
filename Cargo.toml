@@ -1,0 +1,27 @@
+[package]
+name = "futures-rustls"
+version = "0.21.1"
+authors = ["quininer kel <quininer@live.com>"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/quininer/futures-rustls"
+homepage = "https://github.com/quininer/futures-rustls"
+documentation = "https://docs.rs/futures-rustls"
+readme = "README.md"
+description = "Asynchronous TLS/SSL streams for futures using Rustls."
+categories = ["asynchronous", "cryptography", "network-programming"]
+edition = "2018"
+
+[dependencies]
+futures-io = "0.3"
+rustls = "0.19"
+webpki = "0.21"
+
+[features]
+early-data = []
+dangerous_configuration = ["rustls/dangerous_configuration"]
+
+[dev-dependencies]
+smol = "1"
+futures-util = { version = "0.3.1", features = [ "io" ] }
+lazy_static = "1"
+webpki-roots = "0.21"
