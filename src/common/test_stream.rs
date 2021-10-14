@@ -1,17 +1,16 @@
 use super::Stream;
 use futures_util::future::poll_fn;
 use futures_util::task::noop_waker_ref;
-use rustls::internal::pemfile::{certs, rsa_private_keys};
-use rustls::{ClientConfig, ClientSession, NoClientAuth, ServerConfig, ServerSession, Session};
+use rustls::{ClientConnection, Connection, OwnedTrustAnchor, RootCertStore, ServerConnection};
+use rustls_pemfile::{certs, rsa_private_keys};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_util::io::{AsyncReadExt, AsyncWriteExt};
-use webpki::DNSNameRef;
 
-struct Good<'a>(&'a mut dyn Session);
+struct Good<'a>(&'a mut Connection);
 
 impl<'a> AsyncRead for Good<'a> {
     fn poll_read(
@@ -43,9 +42,10 @@ impl<'a> AsyncWrite for Good<'a> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.0.send_close_notify();
-        Poll::Ready(Ok(()))
+        dbg!("sent close notify");
+        self.poll_flush(cx)
     }
 }
 
@@ -79,19 +79,22 @@ impl AsyncWrite for Pending {
     }
 }
 
-struct Eof;
+struct Expected(Cursor<Vec<u8>>);
 
-impl AsyncRead for Eof {
+impl AsyncRead for Expected {
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        _: &mut [u8],
+        buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        Poll::Ready(Ok(0))
+        let this = self.get_mut();
+        let n = std::io::Read::read(&mut this.0, buf)?;
+
+        Poll::Ready(Ok(n))
     }
 }
 
-impl AsyncWrite for Eof {
+impl AsyncWrite for Expected {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -109,154 +112,217 @@ impl AsyncWrite for Eof {
     }
 }
 
-async fn stream_good() -> io::Result<()> {
-    const FILE: &'static [u8] = include_bytes!("../../README.md");
+#[test]
+fn stream_good() -> io::Result<()> {
+    const FILE: &[u8] = include_bytes!("../../README.md");
 
-    let (mut server, mut client) = make_pair();
-    poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
-    io::copy(&mut Cursor::new(FILE), &mut server)?;
+    let fut = async {
+        let (server, mut client) = make_pair();
+        let mut server = Connection::from(server);
+        poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
 
-    {
-        let mut good = Good(&mut server);
-        let mut stream = Stream::new(&mut good, &mut client);
+        io::copy(&mut Cursor::new(FILE), &mut server.writer())?;
+        server.send_close_notify();
+
+        let mut server = Connection::from(server);
+
+        {
+            let mut good = Good(&mut server);
+            let mut stream = Stream::new(&mut good, &mut client);
+
+            let mut buf = Vec::new();
+            dbg!(stream.read_to_end(&mut buf).await)?;
+            assert_eq!(buf, FILE);
+
+            dbg!(stream.write_all(b"Hello World!").await)?;
+            stream.session.send_close_notify();
+
+            dbg!(stream.close().await)?;
+        }
+
+        let mut buf = String::new();
+        dbg!(server.process_new_packets()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        dbg!(server.reader().read_to_string(&mut buf))?;
+        assert_eq!(buf, "Hello World!");
+
+        Ok(()) as io::Result<()>
+    };
+
+    smol::block_on(fut)
+}
+
+#[test]
+fn stream_bad() -> io::Result<()> {
+    let fut = async {
+        let (server, mut client) = make_pair();
+        let mut server = Connection::from(server);
+        poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
+        client.set_buffer_limit(Some(1024));
+
+        let mut bad = Pending;
+        let mut stream = Stream::new(&mut bad, &mut client);
+        assert_eq!(
+            poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x42; 8])).await?,
+            8
+        );
+        assert_eq!(
+            poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x42; 8])).await?,
+            8
+        );
+        let r = poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x00; 1024])).await?; // fill buffer
+        assert!(r < 1024);
+
+        let mut cx = Context::from_waker(noop_waker_ref());
+        let ret = stream.as_mut_pin().poll_write(&mut cx, &[0x01]);
+        assert!(ret.is_pending());
+
+        Ok(()) as io::Result<()>
+    };
+
+    smol::block_on(fut)
+}
+
+#[test]
+fn stream_handshake() -> io::Result<()> {
+    let fut = async {
+        let (server, mut client) = make_pair();
+        let mut server = Connection::from(server);
+
+        {
+            let mut good = Good(&mut server);
+            let mut stream = Stream::new(&mut good, &mut client);
+            let (r, w) = poll_fn(|cx| stream.handshake(cx)).await?;
+
+            assert!(r > 0);
+            assert!(w > 0);
+
+            poll_fn(|cx| stream.handshake(cx)).await?; // finish server handshake
+        }
+
+        assert!(!server.is_handshaking());
+        assert!(!client.is_handshaking());
+
+        Ok(()) as io::Result<()>
+    };
+
+    smol::block_on(fut)
+}
+
+#[test]
+fn stream_handshake_eof() -> io::Result<()> {
+    let fut = async {
+        let (_, mut client) = make_pair();
+
+        let mut bad = Expected(Cursor::new(Vec::new()));
+        let mut stream = Stream::new(&mut bad, &mut client);
+
+        let mut cx = Context::from_waker(noop_waker_ref());
+        let r = stream.handshake(&mut cx);
+        assert_eq!(
+            r.map_err(|err| err.kind()),
+            Poll::Ready(Err(io::ErrorKind::UnexpectedEof))
+        );
+
+        Ok(()) as io::Result<()>
+    };
+
+    smol::block_on(fut)
+}
+
+// see https://github.com/tokio-rs/tls/issues/77
+#[test]
+fn stream_handshake_regression_issues_77() -> io::Result<()> {
+    let fut = async {
+        let (_, mut client) = make_pair();
+
+        let mut bad = Expected(Cursor::new(b"\x15\x03\x01\x00\x02\x02\x00".to_vec()));
+        let mut stream = Stream::new(&mut bad, &mut client);
+
+        let mut cx = Context::from_waker(noop_waker_ref());
+        let r = stream.handshake(&mut cx);
+        assert_eq!(
+            r.map_err(|err| err.kind()),
+            Poll::Ready(Err(io::ErrorKind::UnexpectedEof))
+        );
+
+        Ok(()) as io::Result<()>
+    };
+
+    smol::block_on(fut)
+}
+
+#[test]
+fn stream_eof() -> io::Result<()> {
+    let fut = async {
+        let (server, mut client) = make_pair();
+        let mut server = Connection::from(server);
+        poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
+
+        let mut bad = Expected(Cursor::new(Vec::new()));
+        let mut stream = Stream::new(&mut bad, &mut client);
 
         let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        assert_eq!(buf, FILE);
-        stream.write_all(b"Hello World!").await?;
-        stream.flush().await?;
-    }
+        let result = stream.read_to_end(&mut buf).await;
+        assert_eq!(
+            result.err().map(|e| e.kind()),
+            Some(io::ErrorKind::UnexpectedEof)
+        );
 
-    let mut buf = String::new();
-    server.read_to_string(&mut buf)?;
-    assert_eq!(buf, "Hello World!");
+        Ok(()) as io::Result<()>
+    };
 
-    Ok(()) as io::Result<()>
+    smol::block_on(fut)
 }
 
-#[test]
-fn test_stream_good() -> io::Result<()> {
-    smol::block_on(stream_good())
-}
+fn make_pair() -> (ServerConnection, ClientConnection) {
+    use std::convert::TryFrom;
 
-async fn stream_bad() -> io::Result<()> {
-    let (mut server, mut client) = make_pair();
-    poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
-    client.set_buffer_limit(1024);
-
-    let mut bad = Pending;
-    let mut stream = Stream::new(&mut bad, &mut client);
-    assert_eq!(
-        poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x42; 8])).await?,
-        8
-    );
-    assert_eq!(
-        poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x42; 8])).await?,
-        8
-    );
-    let r = poll_fn(|cx| stream.as_mut_pin().poll_write(cx, &[0x00; 1024])).await?; // fill buffer
-    assert!(r < 1024);
-
-    let mut cx = Context::from_waker(noop_waker_ref());
-    let ret = stream.as_mut_pin().poll_write(&mut cx, &[0x01]);
-    assert!(ret.is_pending());
-
-    Ok(()) as io::Result<()>
-}
-
-#[test]
-fn test_stream_bad() -> io::Result<()> {
-    smol::block_on(stream_bad())
-}
-
-async fn stream_handshake() -> io::Result<()> {
-    let (mut server, mut client) = make_pair();
-
-    {
-        let mut good = Good(&mut server);
-        let mut stream = Stream::new(&mut good, &mut client);
-        let (r, w) = poll_fn(|cx| stream.handshake(cx)).await?;
-
-        assert!(r > 0);
-        assert!(w > 0);
-
-        poll_fn(|cx| stream.handshake(cx)).await?; // finish server handshake
-    }
-
-    assert!(!server.is_handshaking());
-    assert!(!client.is_handshaking());
-
-    Ok(()) as io::Result<()>
-}
-
-#[test]
-fn test_stream_handshake() -> io::Result<()> {
-    smol::block_on(stream_handshake())
-}
-
-async fn stream_handshake_eof() -> io::Result<()> {
-    let (_, mut client) = make_pair();
-
-    let mut bad = Eof;
-    let mut stream = Stream::new(&mut bad, &mut client);
-
-    let mut cx = Context::from_waker(noop_waker_ref());
-    let r = stream.handshake(&mut cx);
-    assert_eq!(
-        r.map_err(|err| err.kind()),
-        Poll::Ready(Err(io::ErrorKind::UnexpectedEof))
-    );
-
-    Ok(()) as io::Result<()>
-}
-
-#[test]
-fn test_stream_handshake_eof() -> io::Result<()> {
-    smol::block_on(stream_handshake_eof())
-}
-
-async fn stream_eof() -> io::Result<()> {
-    let (mut server, mut client) = make_pair();
-    poll_fn(|cx| do_handshake(&mut client, &mut server, cx)).await?;
-
-    let mut good = Good(&mut server);
-    let mut stream = Stream::new(&mut good, &mut client).set_eof(true);
-
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    assert_eq!(buf.len(), 0);
-
-    Ok(()) as io::Result<()>
-}
-
-#[test]
-fn test_stream_eof() -> io::Result<()> {
-    smol::block_on(stream_eof())
-}
-
-fn make_pair() -> (ServerSession, ClientSession) {
     const CERT: &str = include_str!("../../tests/end.cert");
     const CHAIN: &str = include_str!("../../tests/end.chain");
     const RSA: &str = include_str!("../../tests/end.rsa");
 
-    let cert = certs(&mut BufReader::new(Cursor::new(CERT))).unwrap();
+    let cert = certs(&mut BufReader::new(Cursor::new(CERT)))
+        .unwrap()
+        .drain(..)
+        .map(rustls::Certificate)
+        .collect();
     let mut keys = rsa_private_keys(&mut BufReader::new(Cursor::new(RSA))).unwrap();
-    let mut sconfig = ServerConfig::new(NoClientAuth::new());
-    sconfig.set_single_cert(cert, keys.pop().unwrap()).unwrap();
-    let server = ServerSession::new(&Arc::new(sconfig));
+    let mut keys = keys.drain(..).map(rustls::PrivateKey);
+    let sconfig = rustls::ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(cert, keys.next().unwrap())
+        .unwrap();
+    let server = ServerConnection::new(Arc::new(sconfig)).unwrap();
 
-    let domain = DNSNameRef::try_from_ascii_str("localhost").unwrap();
-    let mut cconfig = ClientConfig::new();
+    let domain = rustls::ServerName::try_from("localhost").unwrap();
+    let mut client_root_cert_store = RootCertStore::empty();
     let mut chain = BufReader::new(Cursor::new(CHAIN));
-    cconfig.root_store.add_pem_file(&mut chain).unwrap();
-    let client = ClientSession::new(&Arc::new(cconfig), domain);
+    let certs = certs(&mut chain).unwrap();
+    let trust_anchors = certs
+        .iter()
+        .map(|cert| {
+            let ta = webpki::TrustAnchor::try_from_cert_der(&cert[..]).unwrap();
+            OwnedTrustAnchor::from_subject_spki_name_constraints(
+                ta.subject,
+                ta.spki,
+                ta.name_constraints,
+            )
+        })
+        .collect::<Vec<_>>();
+    client_root_cert_store.add_server_trust_anchors(trust_anchors.into_iter());
+    let cconfig = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(client_root_cert_store)
+        .with_no_client_auth();
+    let client = ClientConnection::new(Arc::new(cconfig), domain).unwrap();
 
     (server, client)
 }
 
 fn do_handshake(
-    client: &mut ClientSession,
-    server: &mut ServerSession,
+    client: &mut ClientConnection,
+    server: &mut Connection,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>> {
     let mut good = Good(server);

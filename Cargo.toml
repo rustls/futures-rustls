@@ -1,6 +1,6 @@
 [package]
 name = "futures-rustls"
-version = "0.21.1"
+version = "0.22.0"
 authors = ["quininer kel <quininer@live.com>"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/quininer/futures-rustls"
@@ -13,8 +13,8 @@ edition = "2018"
 
 [dependencies]
 futures-io = "0.3"
-rustls = "0.19"
-webpki = "0.21"
+rustls = "0.20"
+webpki = "0.22"
 
 [features]
 early-data = []
@@ -24,4 +24,5 @@ dangerous_configuration = ["rustls/dangerous_configuration"]
 smol = "1"
 futures-util = { version = "0.3.1", features = [ "io" ] }
 lazy_static = "1"
-webpki-roots = "0.21"
+rustls-pemfile = "0.2"
+webpki-roots = "0.22"

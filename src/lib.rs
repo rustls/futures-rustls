@@ -14,14 +14,17 @@ mod common;
 pub mod server;
 
 use common::{MidHandshake, Stream, TlsState};
-use rustls::{ClientConfig, ClientSession, ServerConfig, ServerSession, Session};
+use rustls::{ClientConfig, ClientConnection, CommonState, ServerConfig, ServerConnection};
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use futures_io::{AsyncRead, AsyncWrite};
-use webpki::DNSNameRef;
 
 pub use rustls;
 pub use webpki;
@@ -68,19 +71,29 @@ impl TlsConnector {
     }
 
     #[inline]
-    pub fn connect<IO>(&self, domain: DNSNameRef, stream: IO) -> Connect<IO>
+    pub fn connect<IO>(&self, domain: rustls::ServerName, stream: IO) -> Connect<IO>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
         self.connect_with(domain, stream, |_| ())
     }
 
-    pub fn connect_with<IO, F>(&self, domain: DNSNameRef, stream: IO, f: F) -> Connect<IO>
+    pub fn connect_with<IO, F>(&self, domain: rustls::ServerName, stream: IO, f: F) -> Connect<IO>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
-        F: FnOnce(&mut ClientSession),
+        F: FnOnce(&mut ClientConnection),
     {
-        let mut session = ClientSession::new(&self.inner, domain);
+        let mut session = match ClientConnection::new(self.inner.clone(), domain) {
+            Ok(session) => session,
+            Err(error) => {
+                return Connect(MidHandshake::Error {
+                    io: stream,
+                    // TODO(eliza): should this really return an `io::Error`?
+                    // Probably not...
+                    error: io::Error::new(io::ErrorKind::Other, error),
+                });
+            }
+        };
         f(&mut session);
 
         Connect(MidHandshake::Handshaking(client::TlsStream {
@@ -95,6 +108,9 @@ impl TlsConnector {
             } else {
                 TlsState::Stream
             },
+
+            #[cfg(feature = "early-data")]
+            early_waker: None,
 
             session,
         }))
@@ -113,9 +129,19 @@ impl TlsAcceptor {
     pub fn accept_with<IO, F>(&self, stream: IO, f: F) -> Accept<IO>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
-        F: FnOnce(&mut ServerSession),
+        F: FnOnce(&mut ServerConnection),
     {
-        let mut session = ServerSession::new(&self.inner);
+        let mut session = match ServerConnection::new(self.inner.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                return Accept(MidHandshake::Error {
+                    io: stream,
+                    // TODO(eliza): should this really return an `io::Error`?
+                    // Probably not...
+                    error: io::Error::new(io::ErrorKind::Other, error),
+                });
+            }
+        };
         f(&mut session);
 
         Accept(MidHandshake::Handshaking(server::TlsStream {
@@ -135,22 +161,22 @@ pub struct Connect<IO>(MidHandshake<client::TlsStream<IO>>);
 pub struct Accept<IO>(MidHandshake<server::TlsStream<IO>>);
 
 /// Like [Connect], but returns `IO` on failure.
-pub struct FailableConnect<IO>(MidHandshake<client::TlsStream<IO>>);
+pub struct FallibleConnect<IO>(MidHandshake<client::TlsStream<IO>>);
 
 /// Like [Accept], but returns `IO` on failure.
-pub struct FailableAccept<IO>(MidHandshake<server::TlsStream<IO>>);
+pub struct FallibleAccept<IO>(MidHandshake<server::TlsStream<IO>>);
 
 impl<IO> Connect<IO> {
     #[inline]
-    pub fn into_failable(self) -> FailableConnect<IO> {
-        FailableConnect(self.0)
+    pub fn into_fallible(self) -> FallibleConnect<IO> {
+        FallibleConnect(self.0)
     }
 }
 
 impl<IO> Accept<IO> {
     #[inline]
-    pub fn into_failable(self) -> FailableAccept<IO> {
-        FailableAccept(self.0)
+    pub fn into_fallible(self) -> FallibleAccept<IO> {
+        FallibleAccept(self.0)
     }
 }
 
@@ -172,7 +198,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for Accept<IO> {
     }
 }
 
-impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FailableConnect<IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleConnect<IO> {
     type Output = Result<client::TlsStream<IO>, (io::Error, IO)>;
 
     #[inline]
@@ -181,7 +207,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FailableConnect<IO> {
     }
 }
 
-impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FailableAccept<IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleAccept<IO> {
     type Output = Result<server::TlsStream<IO>, (io::Error, IO)>;
 
     #[inline]
@@ -194,13 +220,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FailableAccept<IO> {
 ///
 /// This abstracts over the inner `client::TlsStream` and `server::TlsStream`, so you can use
 /// a single type to keep both client- and server-initiated TLS-encrypted connections.
+#[derive(Debug)]
 pub enum TlsStream<T> {
     Client(client::TlsStream<T>),
     Server(server::TlsStream<T>),
 }
 
 impl<T> TlsStream<T> {
-    pub fn get_ref(&self) -> (&T, &dyn Session) {
+    pub fn get_ref(&self) -> (&T, &CommonState) {
         use TlsStream::*;
         match self {
             Client(io) => {
@@ -214,7 +241,7 @@ impl<T> TlsStream<T> {
         }
     }
 
-    pub fn get_mut(&mut self) -> (&mut T, &mut dyn Session) {
+    pub fn get_mut(&mut self) -> (&mut T, &mut CommonState) {
         use TlsStream::*;
         match self {
             Client(io) => {
@@ -238,6 +265,26 @@ impl<T> From<client::TlsStream<T>> for TlsStream<T> {
 impl<T> From<server::TlsStream<T>> for TlsStream<T> {
     fn from(s: server::TlsStream<T>) -> Self {
         Self::Server(s)
+    }
+}
+
+#[cfg(unix)]
+impl<S> AsRawFd for TlsStream<S>
+where
+    S: AsRawFd,
+{
+    fn as_raw_fd(&self) -> RawFd {
+        self.get_ref().0.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl<S> AsRawSocket for TlsStream<S>
+where
+    S: AsRawSocket,
+{
+    fn as_raw_socket(&self) -> RawSocket {
+        self.get_ref().0.as_raw_socket()
     }
 }
 
