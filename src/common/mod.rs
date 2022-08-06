@@ -1,12 +1,12 @@
 mod handshake;
 
+use futures_io::{AsyncRead, AsyncWrite};
 pub(crate) use handshake::{IoSession, MidHandshake};
 use rustls::{ConnectionCommon, SideData};
 use std::io::{self, IoSlice, Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures_io::{AsyncRead, AsyncWrite};
 
 #[derive(Debug)]
 pub enum TlsState {
@@ -189,7 +189,7 @@ where
                     Poll::Ready(Ok(n)) => {
                         wrlen += n;
                         need_flush = true;
-                    },
+                    }
                     Poll::Pending => {
                         write_would_block = true;
                         break;
@@ -348,6 +348,26 @@ where
             ready!(self.write_io(cx))?;
         }
         Pin::new(&mut self.io).poll_close(cx)
+    }
+}
+
+/// An adapter that implements a [`Read`] interface for [`AsyncRead`] types and an
+/// associated [`Context`].
+///
+/// Turns `Poll::Pending` into `WouldBlock`.
+pub struct SyncReadAdapter<'a, 'b, T> {
+    pub io: &'a mut T,
+    pub cx: &'a mut Context<'b>,
+}
+
+impl<'a, 'b, T: AsyncRead + Unpin> Read for SyncReadAdapter<'a, 'b, T> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match Pin::new(&mut self.io).poll_read(self.cx, buf) {
+            Poll::Ready(Ok(n)) => Ok(n),
+            Poll::Ready(Err(err)) => Err(err),
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
     }
 }
 
