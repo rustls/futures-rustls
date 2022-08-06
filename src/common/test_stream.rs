@@ -295,7 +295,7 @@ fn make_pair() -> (ServerConnection, ClientConnection) {
         .unwrap();
     let server = ServerConnection::new(Arc::new(sconfig)).unwrap();
 
-    let domain = rustls::ServerName::try_from("localhost").unwrap();
+    let domain = rustls::ServerName::try_from("foobar.com").unwrap();
     let mut client_root_cert_store = RootCertStore::empty();
     let mut chain = BufReader::new(Cursor::new(CHAIN));
     let certs = certs(&mut chain).unwrap();

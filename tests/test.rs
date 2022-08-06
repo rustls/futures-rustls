@@ -66,7 +66,7 @@ lazy_static! {
         });
 
         let addr = recv.recv().unwrap();
-        (addr, "testserver.com", CHAIN)
+        (addr, "foobar.com", CHAIN)
     };
 }
 
