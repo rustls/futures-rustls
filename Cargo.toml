@@ -14,7 +14,6 @@ edition = "2018"
 [dependencies]
 futures-io = "0.3"
 rustls = "0.21"
-webpki = { version = "0.100", package = "rustls-webpki" }
 
 [features]
 early-data = []
@@ -26,3 +25,4 @@ futures-util = { version = "0.3.1", features = [ "io" ] }
 lazy_static = "1"
 rustls-pemfile = "0.2"
 webpki-roots = "0.22"
+webpki = { version = "0.100", package = "rustls-webpki" }
