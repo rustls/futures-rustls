@@ -3,7 +3,7 @@
 [![docs.rs](https://docs.rs/futures-rustls/badge.svg)](https://docs.rs/futures-rustls/)
 
 Asynchronous TLS/SSL streams for futures using
-[Rustls](https://github.com/ctz/rustls).
+[Rustls](https://github.com/rustls/rustls).
 
 ### Basic Structure of a Client
 
@@ -35,7 +35,7 @@ This project is licensed under either of
 
 at your option.
 
-This started as a fork of [tokio-rustls](https://github.com/tokio-rs/tls).
+This started as a fork of [tokio-rustls](https://github.com/rustls/tokio-rustls).
 
 ### Contribution
 
