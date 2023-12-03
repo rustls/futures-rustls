@@ -13,16 +13,16 @@ edition = "2018"
 
 [dependencies]
 futures-io = "0.3"
-rustls = "0.21"
+rustls = "0.22"
+pki-types = { package = "rustls-pki-types", version = "1" }
 
 [features]
 early-data = []
-dangerous_configuration = ["rustls/dangerous_configuration"]
 
 [dev-dependencies]
 smol = "1"
 futures-util = { version = "0.3.1", features = [ "io" ] }
 lazy_static = "1"
-rustls-pemfile = "1"
-webpki-roots = "0.23"
-webpki = { version = "0.100", package = "rustls-webpki" }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+webpki = { version = "0.102", package = "rustls-webpki" }
