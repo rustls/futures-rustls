@@ -291,7 +291,7 @@ fn make_pair() -> (ServerConnection, ClientConnection) {
         .unwrap();
     let server = ServerConnection::new(Arc::new(sconfig)).unwrap();
 
-    let domain = pki_types::ServerName::try_from("foobar.com")
+    let domain = pki_types::ServerName::try_from("testserver.com")
         .unwrap()
         .to_owned();
     let mut client_root_cert_store = RootCertStore::empty();
