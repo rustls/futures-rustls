@@ -1,5 +1,4 @@
 # futures-rustls
-[![github actions](https://github.com/quininer/tls/workflows/Rust/badge.svg)](https://github.com/quininer/futures-rustls/actions)
 [![crates](https://img.shields.io/crates/v/futures-rustls.svg)](https://crates.io/crates/futures-rustls)
 [![docs.rs](https://docs.rs/futures-rustls/badge.svg)](https://docs.rs/futures-rustls/)
 
