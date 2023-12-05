@@ -1,14 +1,14 @@
 use super::Stream;
+use futures_io::{AsyncRead, AsyncWrite};
 use futures_util::future::poll_fn;
+use futures_util::io::{AsyncReadExt, AsyncWriteExt};
 use futures_util::task::noop_waker_ref;
-use rustls::{ClientConnection, Connection, OwnedTrustAnchor, RootCertStore, ServerConnection};
-use rustls_pemfile::{certs, rsa_private_keys};
+use rustls::{ClientConnection, Connection, RootCertStore, ServerConnection};
+use rustls_pemfile::{certs, private_key};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use futures_io::{AsyncRead, AsyncWrite};
-use futures_util::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Good<'a>(&'a mut Connection);
 
@@ -282,37 +282,23 @@ fn make_pair() -> (ServerConnection, ClientConnection) {
     const RSA: &str = include_str!("../../tests/end.rsa");
 
     let cert = certs(&mut BufReader::new(Cursor::new(CERT)))
-        .unwrap()
-        .drain(..)
-        .map(rustls::Certificate)
-        .collect();
-    let mut keys = rsa_private_keys(&mut BufReader::new(Cursor::new(RSA))).unwrap();
-    let mut keys = keys.drain(..).map(rustls::PrivateKey);
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = private_key(&mut BufReader::new(Cursor::new(RSA))).unwrap();
     let sconfig = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(cert, keys.next().unwrap())
+        .with_single_cert(cert, key.unwrap())
         .unwrap();
     let server = ServerConnection::new(Arc::new(sconfig)).unwrap();
 
-    let domain = rustls::ServerName::try_from("foobar.com").unwrap();
+    let domain = pki_types::ServerName::try_from("testserver.com")
+        .unwrap()
+        .to_owned();
     let mut client_root_cert_store = RootCertStore::empty();
     let mut chain = BufReader::new(Cursor::new(CHAIN));
-    let certs = certs(&mut chain).unwrap();
-    let trust_anchors = certs
-        .iter()
-        .map(|cert| {
-            let ta = webpki::TrustAnchor::try_from_cert_der(&cert[..]).unwrap();
-            OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        })
-        .collect::<Vec<_>>();
-    client_root_cert_store.add_server_trust_anchors(trust_anchors.into_iter());
+    let certs = certs(&mut chain).collect::<Result<Vec<_>, _>>().unwrap();
+    client_root_cert_store.add_parsable_certificates(certs);
     let cconfig = rustls::ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(client_root_cert_store)
         .with_no_client_auth();
     let client = ClientConnection::new(Arc::new(cconfig), domain).unwrap();

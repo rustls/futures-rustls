@@ -1,17 +1,17 @@
+use futures_rustls::{TlsAcceptor, TlsConnector};
 use futures_util::future::TryFutureExt;
+use futures_util::io::{copy, AsyncReadExt, AsyncWriteExt};
 use lazy_static::lazy_static;
-use rustls::{ClientConfig, OwnedTrustAnchor};
-use rustls_pemfile::{certs, rsa_private_keys};
+use rustls::ClientConfig;
+use rustls_pemfile::{certs, private_key};
+use smol::net::{TcpListener, TcpStream};
+use smol::Timer;
 use std::convert::TryFrom;
 use std::io::{BufReader, Cursor};
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::{io, thread};
-use futures_util::io::{copy, AsyncReadExt, AsyncWriteExt};
-use smol::net::{TcpListener, TcpStream};
-use smol::Timer;
-use futures_rustls::{TlsAcceptor, TlsConnector};
 
 const CERT: &str = include_str!("end.cert");
 const CHAIN: &[u8] = include_bytes!("end.chain");
@@ -20,17 +20,15 @@ const RSA: &str = include_str!("end.rsa");
 lazy_static! {
     static ref TEST_SERVER: (SocketAddr, &'static str, &'static [u8]) = {
         let cert = certs(&mut BufReader::new(Cursor::new(CERT)))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = private_key(&mut BufReader::new(Cursor::new(RSA)))
             .unwrap()
-            .drain(..)
-            .map(rustls::Certificate)
-            .collect();
-        let mut keys = rsa_private_keys(&mut BufReader::new(Cursor::new(RSA))).unwrap();
-        let mut keys = keys.drain(..).map(rustls::PrivateKey);
+            .unwrap();
 
         let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(cert, keys.next().unwrap())
+            .with_single_cert(cert, key)
             .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
 
@@ -66,7 +64,7 @@ lazy_static! {
         });
 
         let addr = recv.recv().unwrap();
-        (addr, "foobar.com", CHAIN)
+        (addr, "testserver.com", CHAIN)
     };
 }
 
@@ -77,7 +75,7 @@ fn start_server() -> &'static (SocketAddr, &'static str, &'static [u8]) {
 async fn start_client(addr: SocketAddr, domain: &str, config: Arc<ClientConfig>) -> io::Result<()> {
     const FILE: &[u8] = include_bytes!("../README.md");
 
-    let domain = rustls::ServerName::try_from(domain).unwrap();
+    let domain = pki_types::ServerName::try_from(domain).unwrap().to_owned();
     let config = TlsConnector::from(config);
     let mut buf = vec![0; FILE.len()];
 
@@ -103,22 +101,14 @@ fn pass() -> io::Result<()> {
         use std::time::*;
         Timer::after(Duration::from_secs(1)).await;
 
-        let chain = certs(&mut std::io::Cursor::new(*chain)).unwrap();
-        let trust_anchors = chain
-            .iter()
-            .map(|cert| {
-                let ta = webpki::TrustAnchor::try_from_cert_der(&cert[..]).unwrap();
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            })
-            .collect::<Vec<_>>();
+        let chain = certs(&mut std::io::Cursor::new(*chain))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add_server_trust_anchors(trust_anchors.into_iter());
+        root_store.add_parsable_certificates(chain);
+
         let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(root_store)
             .with_no_client_auth();
         let config = Arc::new(config);
@@ -136,22 +126,13 @@ fn fail() -> io::Result<()> {
     let fut = async {
         let (addr, domain, chain) = start_server();
 
-        let chain = certs(&mut std::io::Cursor::new(*chain)).unwrap();
-        let trust_anchors = chain
-            .iter()
-            .map(|cert| {
-                let ta = webpki::TrustAnchor::try_from_cert_der(&cert[..]).unwrap();
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            })
-            .collect::<Vec<_>>();
+        let chain = certs(&mut std::io::Cursor::new(*chain))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add_server_trust_anchors(trust_anchors.into_iter());
+        root_store.add_parsable_certificates(chain);
         let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(root_store)
             .with_no_client_auth();
         let config = Arc::new(config);
