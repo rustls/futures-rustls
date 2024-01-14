@@ -13,11 +13,14 @@ edition = "2018"
 
 [dependencies]
 futures-io = "0.3"
-rustls = "0.22"
+rustls = { version = "0.22", default-features = false, features = ["tls12"] }
 pki-types = { package = "rustls-pki-types", version = "1" }
 
 [features]
+default = ["ring"]
 early-data = []
+ring = ["rustls/ring"]
+aws-lc-rs = ["rustls/aws_lc_rs"]
 
 [dev-dependencies]
 smol = "1"
@@ -25,4 +28,4 @@ futures-util = { version = "0.3.1", features = [ "io" ] }
 lazy_static = "1"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
-webpki = { version = "0.102", package = "rustls-webpki" }
+webpki = { version = "0.102", package = "rustls-webpki", default-features = false }
