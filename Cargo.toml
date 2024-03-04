@@ -13,14 +13,17 @@ edition = "2018"
 
 [dependencies]
 futures-io = "0.3"
-rustls = { version = "0.22", default-features = false, features = ["tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 pki-types = { package = "rustls-pki-types", version = "1" }
 
 [features]
-default = ["ring"]
-early-data = []
-ring = ["rustls/ring"]
+default = ["aws-lc-rs", "tls12", "logging"]
 aws-lc-rs = ["rustls/aws_lc_rs"]
+early-data = []
+fips = ["rustls/fips"]
+logging = ["rustls/logging"]
+ring = ["rustls/ring"]
+tls12 = ["rustls/tls12"]
 
 [dev-dependencies]
 smol = "1"

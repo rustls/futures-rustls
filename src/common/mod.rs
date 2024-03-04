@@ -89,23 +89,7 @@ where
     }
 
     pub fn read_io(&mut self, cx: &mut Context) -> Poll<io::Result<usize>> {
-        struct Reader<'a, 'b, T> {
-            io: &'a mut T,
-            cx: &'a mut Context<'b>,
-        }
-
-        impl<'a, 'b, T: AsyncRead + Unpin> Read for Reader<'a, 'b, T> {
-            #[inline]
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                match Pin::new(&mut self.io).poll_read(self.cx, buf) {
-                    Poll::Ready(Ok(n)) => Ok(n),
-                    Poll::Ready(Err(err)) => Err(err),
-                    Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
-                }
-            }
-        }
-
-        let mut reader = Reader { io: self.io, cx };
+        let mut reader = SyncReadAdapter { io: self.io, cx };
 
         let n = match self.session.read_tls(&mut reader) {
             Ok(n) => n,
@@ -133,41 +117,7 @@ where
     }
 
     pub fn write_io(&mut self, cx: &mut Context) -> Poll<io::Result<usize>> {
-        struct Writer<'a, 'b, T> {
-            io: &'a mut T,
-            cx: &'a mut Context<'b>,
-        }
-
-        impl<'a, 'b, T: Unpin> Writer<'a, 'b, T> {
-            #[inline]
-            fn poll_with<U>(
-                &mut self,
-                f: impl FnOnce(Pin<&mut T>, &mut Context<'_>) -> Poll<io::Result<U>>,
-            ) -> io::Result<U> {
-                match f(Pin::new(&mut self.io), self.cx) {
-                    Poll::Ready(result) => result,
-                    Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
-                }
-            }
-        }
-
-        impl<'a, 'b, T: AsyncWrite + Unpin> Write for Writer<'a, 'b, T> {
-            #[inline]
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.poll_with(|io, cx| io.poll_write(cx, buf))
-            }
-
-            #[inline]
-            fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-                self.poll_with(|io, cx| io.poll_write_vectored(cx, bufs))
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                self.poll_with(|io, cx| io.poll_flush(cx))
-            }
-        }
-
-        let mut writer = Writer { io: self.io, cx };
+        let mut writer = SyncWriteAdapter { io: self.io, cx };
 
         match self.session.write_tls(&mut writer) {
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
@@ -368,6 +318,40 @@ impl<'a, 'b, T: AsyncRead + Unpin> Read for SyncReadAdapter<'a, 'b, T> {
             Poll::Ready(Err(err)) => Err(err),
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
         }
+    }
+}
+
+pub(crate) struct SyncWriteAdapter<'a, 'b, T> {
+    pub(crate) io: &'a mut T,
+    pub(crate) cx: &'a mut Context<'b>,
+}
+
+impl<'a, 'b, T: Unpin> SyncWriteAdapter<'a, 'b, T> {
+    #[inline]
+    fn poll_with<U>(
+        &mut self,
+        f: impl FnOnce(Pin<&mut T>, &mut Context<'_>) -> Poll<io::Result<U>>,
+    ) -> io::Result<U> {
+        match f(Pin::new(&mut self.io), self.cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
+}
+
+impl<'a, 'b, T: AsyncWrite + Unpin> Write for SyncWriteAdapter<'a, 'b, T> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.poll_with(|io, cx| io.poll_write(cx, buf))
+    }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.poll_with(|io, cx| io.poll_write_vectored(cx, bufs))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.poll_with(|io, cx| io.poll_flush(cx))
     }
 }
 

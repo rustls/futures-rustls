@@ -1,8 +1,3 @@
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::{AsRawSocket, RawSocket};
-
 use super::*;
 use crate::common::IoSession;
 
