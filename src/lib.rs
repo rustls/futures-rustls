@@ -462,4 +462,16 @@ where
             TlsStream::Server(x) => Pin::new(x).poll_close(cx),
         }
     }
+
+    #[inline]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            TlsStream::Client(x) => Pin::new(x).poll_write_vectored(cx, bufs),
+            TlsStream::Server(x) => Pin::new(x).poll_write_vectored(cx, bufs),
+        }
+    }
 }
