@@ -1,9 +1,5 @@
 use super::*;
 use crate::common::IoSession;
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::{AsRawSocket, RawSocket};
 
 /// A wrapper around an underlying raw stream which implements the TLS or SSL
 /// protocol.
@@ -32,6 +28,72 @@ impl<IO> TlsStream<IO> {
     pub fn into_inner(self) -> (IO, ClientConnection) {
         (self.io, self.session)
     }
+}
+
+#[cfg(feature = "early-data")]
+fn poll_handle_early_data<IO>(
+    state: &mut TlsState,
+    stream: &mut Stream<IO, ClientConnection>,
+    early_waker: &mut Option<std::task::Waker>,
+    cx: &mut Context<'_>,
+    bufs: &[io::IoSlice<'_>],
+) -> Poll<io::Result<usize>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    if let TlsState::EarlyData(pos, data) = state {
+        use std::io::Write;
+
+        // write early data
+        if let Some(mut early_data) = stream.session.early_data() {
+            let mut written = 0;
+
+            for buf in bufs {
+                if buf.is_empty() {
+                    continue;
+                }
+
+                let len = match early_data.write(buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+
+                written += len;
+                data.extend_from_slice(&buf[..len]);
+
+                if len < buf.len() {
+                    break;
+                }
+            }
+
+            if written != 0 {
+                return Poll::Ready(Ok(written));
+            }
+        }
+
+        // complete handshake
+        while stream.session.is_handshaking() {
+            ready!(stream.handshake(cx))?;
+        }
+
+        // write early data (fallback)
+        if !stream.session.is_early_data_accepted() {
+            while *pos < data.len() {
+                let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
+                *pos += len;
+            }
+        }
+
+        // end
+        *state = TlsState::Stream;
+
+        if let Some(waker) = early_waker.take() {
+            waker.wake();
+        }
+    }
+
+    Poll::Ready(Ok(0))
 }
 
 #[cfg(unix)]
@@ -145,48 +207,47 @@ where
         let mut stream =
             Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
 
-        #[allow(clippy::match_single_binding)]
-        match this.state {
-            #[cfg(feature = "early-data")]
-            TlsState::EarlyData(ref mut pos, ref mut data) => {
-                use std::io::Write;
-
-                // write early data
-                if let Some(mut early_data) = stream.session.early_data() {
-                    let len = match early_data.write(buf) {
-                        Ok(n) => n,
-                        Err(err) => return Poll::Ready(Err(err)),
-                    };
-                    if len != 0 {
-                        data.extend_from_slice(&buf[..len]);
-                        return Poll::Ready(Ok(len));
-                    }
-                }
-
-                // complete handshake
-                while stream.session.is_handshaking() {
-                    ready!(stream.handshake(cx))?;
-                }
-
-                // write early data (fallback)
-                if !stream.session.is_early_data_accepted() {
-                    while *pos < data.len() {
-                        let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
-                        *pos += len;
-                    }
-                }
-
-                // end
-                this.state = TlsState::Stream;
-
-                if let Some(waker) = this.early_waker.take() {
-                    waker.wake();
-                }
-
-                stream.as_mut_pin().poll_write(cx, buf)
+        #[cfg(feature = "early-data")]
+        {
+            let bufs = [io::IoSlice::new(buf)];
+            let written = ready!(poll_handle_early_data(
+                &mut this.state,
+                &mut stream,
+                &mut this.early_waker,
+                cx,
+                &bufs
+            ))?;
+            if written != 0 {
+                return Poll::Ready(Ok(written));
             }
-            _ => stream.as_mut_pin().poll_write(cx, buf),
         }
+        stream.as_mut_pin().poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let mut stream =
+            Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
+
+        #[cfg(feature = "early-data")]
+        {
+            let written = ready!(poll_handle_early_data(
+                &mut this.state,
+                &mut stream,
+                &mut this.early_waker,
+                cx,
+                bufs
+            ))?;
+            if written != 0 {
+                return Poll::Ready(Ok(written));
+            }
+        }
+
+        stream.as_mut_pin().poll_write_vectored(cx, bufs)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
