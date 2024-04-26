@@ -1,6 +1,6 @@
 [package]
 name = "futures-rustls"
-version = "0.26.1"
+version = "0.26.0"
 authors = ["quininer kel <quininer@live.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/quininer/futures-rustls"
