@@ -9,7 +9,7 @@ documentation = "https://docs.rs/futures-rustls"
 readme = "README.md"
 description = "Asynchronous TLS/SSL streams for futures using Rustls."
 categories = ["asynchronous", "cryptography", "network-programming"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 futures-io = "0.3"
