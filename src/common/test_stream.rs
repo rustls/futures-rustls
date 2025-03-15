@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 struct Good<'a>(&'a mut Connection);
 
-impl<'a> AsyncRead for Good<'a> {
+impl AsyncRead for Good<'_> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -22,7 +22,7 @@ impl<'a> AsyncRead for Good<'a> {
     }
 }
 
-impl<'a> AsyncWrite for Good<'a> {
+impl AsyncWrite for Good<'_> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -124,7 +124,7 @@ fn stream_good() -> io::Result<()> {
         io::copy(&mut Cursor::new(FILE), &mut server.writer())?;
         server.send_close_notify();
 
-        let mut server = Connection::from(server);
+        let mut server = server;
 
         {
             let mut good = Good(&mut server);

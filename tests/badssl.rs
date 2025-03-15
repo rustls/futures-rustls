@@ -1,15 +1,15 @@
+use futures_rustls::{
+    client::TlsStream,
+    pki_types::ServerName,
+    rustls::{self, ClientConfig},
+    TlsConnector,
+};
+use futures_util::io::{AsyncReadExt, AsyncWriteExt};
+use smol::net::TcpStream;
 use std::convert::TryFrom;
 use std::io;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
-use futures_util::io::{AsyncReadExt, AsyncWriteExt};
-use smol::net::TcpStream;
-use futures_rustls::{
-    client::TlsStream,
-    rustls::{self, ClientConfig},
-    pki_types::{ServerName},
-    TlsConnector,
-};
 
 async fn get(
     config: Arc<ClientConfig>,
@@ -36,11 +36,12 @@ async fn get(
 fn test_tls12() -> io::Result<()> {
     let fut = async {
         let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
 
         let config = Arc::new(config);
         let domain = "tls-v1-2.badssl.com";
@@ -69,7 +70,7 @@ fn test_tls13() {
 fn test_modern() -> io::Result<()> {
     let fut = async {
         let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
         let config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
