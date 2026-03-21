@@ -32,6 +32,7 @@ async fn get(
     Ok((stream, String::from_utf8(buf).unwrap()))
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn test_tls12() -> io::Result<()> {
     let fut = async {
