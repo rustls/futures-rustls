@@ -33,4 +33,4 @@ futures-util = { version = "0.3.1", features = [ "io" ] }
 lazy_static = "1"
 rustls-pemfile = "2"
 webpki-roots = "1"
-webpki = { version = "0.102", package = "rustls-webpki", default-features = false }
+webpki = { version = "0.103", package = "rustls-webpki", default-features = false }
