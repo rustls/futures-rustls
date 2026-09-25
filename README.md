@@ -8,18 +8,27 @@ Asynchronous TLS/SSL streams for futures using
 ### Basic Structure of a Client
 
 ```rust
-use webpki::DNSNameRef;
-use futures_rustls::{ TlsConnector, rustls::ClientConfig };
+use webpki_roots::TLS_SERVER_ROOTS;
+use futures_rustls::{
+    TlsConnector,
+    rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
+};
 
 // ...
 
-let mut config = ClientConfig::new();
-config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+let mut root_store = RootCertStore::empty();
+root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
+
+let config = ClientConfig::builder()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+
 let config = TlsConnector::from(Arc::new(config));
-let dnsname = DNSNameRef::try_from_ascii_str("www.rust-lang.org").unwrap();
+let dnsname = ServerName::try_from("www.rust-lang.org").expect("Invalid DNS name.");
 
 let stream = TcpStream::connect(&addr).await?;
 let mut stream = config.connect(dnsname, stream).await?;
+
 
 // ...
 ```
