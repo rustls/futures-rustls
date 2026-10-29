@@ -16,19 +16,19 @@ use futures_rustls::{
 
 // ...
 
-let mut root_store = RootCertStore::empty();
-root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
+let root_store = RootCertStore {
+    roots: TLS_SERVER_ROOTS.to_vec(),
+};
 
 let config = ClientConfig::builder()
     .with_root_certificates(root_store)
     .with_no_client_auth();
 
-let config = TlsConnector::from(Arc::new(config));
+let connector = TlsConnector::from(Arc::new(config));
 let dnsname = ServerName::try_from("www.rust-lang.org").expect("Invalid DNS name.");
 
 let stream = TcpStream::connect(&addr).await?;
-let mut stream = config.connect(dnsname, stream).await?;
-
+let mut stream = connector.connect(dnsname, stream).await?;
 
 // ...
 ```
